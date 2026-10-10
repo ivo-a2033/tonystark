@@ -4,6 +4,7 @@ import {
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 import * as THREE from "three";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
@@ -14,6 +15,7 @@ const threeCanvas = document.querySelector("#three-overlay");
 const context = canvas.getContext("2d");
 const status = document.querySelector("#status");
 const toggleButton = document.querySelector("#toggle-camera");
+const modelInput = document.querySelector("#model-file");
 const emptyState = document.querySelector("#empty-state");
 const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, alpha: true, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -42,19 +44,29 @@ const HAND_CONNECTIONS = [
   [13, 17], [17, 18], [18, 19], [19, 20], [0, 17],
 ];
 
-async function loadModel() {
-  const [vision, loadedHandModel] = await Promise.all([
-    FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
-    ),
-    new OBJLoader().loadAsync("./copyrightFreeToaster.obj"),
-  ]);
-
+async function initializeTracker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+  );
   handLandmarker = await HandLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetPath: "./hand_landmarker.task" },
     runningMode: "VIDEO",
     numHands: 2,
   });
+
+  status.textContent = "Choose an OBJ or DAE model";
+  toggleButton.disabled = false;
+}
+
+function installModel(loadedHandModel) {
+  if (handModel) {
+    orientationGroup.remove(handModel);
+    handModel.traverse((child) => {
+      child.geometry?.dispose();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) material?.dispose();
+    });
+  }
 
   handModel = loadedHandModel;
   handModel.rotation.x = -Math.PI / 2;
@@ -71,7 +83,7 @@ async function loadModel() {
   });
 
   const lineGroup = new THREE.Group();
-  const lineMaterial = new LineMaterial({ color: 0x8ff0a4, linewidth: 0.5 });
+  const lineMaterial = new LineMaterial({ color: 0x8f00f4, linewidth: 0.5 });
   handModel.updateMatrixWorld(true);
   const rootInverse = handModel.matrixWorld.clone().invert();
   for (const mesh of meshes) {
@@ -88,9 +100,24 @@ async function loadModel() {
   }
   handModel.add(lineGroup);
   orientationGroup.add(handModel);
+  modelGroup.visible = false;
+}
 
-  status.textContent = "Camera off";
-  toggleButton.disabled = false;
+async function loadSelectedModel(file) {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  const contents = await file.text();
+  let loadedHandModel;
+
+  if (extension === "obj") {
+    loadedHandModel = new OBJLoader().parse(contents);
+  } else if (extension === "dae") {
+    loadedHandModel = new ColladaLoader().parse(contents, "").scene;
+  } else {
+    throw new Error("Choose an OBJ or DAE file");
+  }
+
+  installModel(loadedHandModel);
+  status.textContent = `Loaded ${file.name}`;
 }
 
 function resizeOverlay(width, height) {
@@ -246,11 +273,24 @@ toggleButton.addEventListener("click", () => {
   else startCamera();
 });
 
+modelInput.addEventListener("change", async () => {
+  const file = modelInput.files?.[0];
+  if (!file) return;
+
+  try {
+    await loadSelectedModel(file);
+    if (!cameraStream && !toggleButton.disabled) await startCamera();
+  } catch (error) {
+    status.textContent = "Could not load model";
+    console.error(error);
+  }
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && cameraStream) stopCamera();
 });
 
-loadModel().catch((error) => {
-  status.textContent = "Could not load tracking models";
+initializeTracker().catch((error) => {
+  status.textContent = "Could not load hand tracking";
   console.error(error);
 });
