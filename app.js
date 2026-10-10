@@ -35,6 +35,13 @@ let handModel;
 let cameraStream;
 let animationFrame;
 let lastVideoTime = -1;
+let lastPoseUpdateTime;
+let poseInitialized = false;
+let hasRightHandPose = false;
+let targetScale = 1;
+const targetHandAnchor = new THREE.Vector2();
+const targetPosition = new THREE.Vector3();
+const targetOrientation = new THREE.Quaternion();
 
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -69,6 +76,9 @@ function installModel(loadedHandModel) {
   }
 
   handModel = loadedHandModel;
+  poseInitialized = false;
+  hasRightHandPose = false;
+  targetScale = 1;
   handModel.rotation.x = -Math.PI / 2;
   handModel.updateMatrixWorld(true);
   const bounds = new THREE.Box3().setFromObject(handModel);
@@ -163,7 +173,7 @@ function handForSide(hands, handedness, side) {
   return hands[index];
 }
 
-function updateObject(hands, handedness) {
+function updateObject(hands, handedness, timestamp) {
   if (!handModel) {
     modelGroup.visible = false;
     return;
@@ -172,13 +182,7 @@ function updateObject(hands, handedness) {
   const width = video.videoWidth;
   const height = video.videoHeight;
   const rightHand = handForSide(hands, handedness, "right");
-  if (!rightHand) {
-    modelGroup.visible = false;
-    return;
-  }
-
   const leftHand = handForSide(hands, handedness, "left");
-  let scale = 1;
   if (leftHand) {
     const thumbTip = leftHand[4];
     const indexTip = leftHand[8];
@@ -186,32 +190,60 @@ function updateObject(hands, handedness) {
       (thumbTip.x - indexTip.x) * width,
       (thumbTip.y - indexTip.y) * height,
     );
-    scale = THREE.MathUtils.clamp(pinchDistance / (Math.min(width, height) * 0.16), 0.35, 2.5);
+    targetScale = THREE.MathUtils.clamp(pinchDistance / (Math.min(width, height) * 0.16), 0.35, 2.5);
   }
 
-  const toFramePoint = (landmark) => new THREE.Vector3(
-    landmark.x * width,
-    landmark.y * height,
-    landmark.z * width,
-  );
-  const wrist = toFramePoint(rightHand[0]);
-  const indexMcp = rightHand[5];
-  const middleMcp = rightHand[9];
-  const pinkyMcp = rightHand[17];
-  const acrossAxis = toFramePoint(pinkyMcp).sub(toFramePoint(indexMcp)).normalize();
-  const longitudinalAxis = toFramePoint(middleMcp).sub(wrist);
-  longitudinalAxis.addScaledVector(acrossAxis, -longitudinalAxis.dot(acrossAxis)).normalize();
-  const normalAxis = acrossAxis.clone().cross(longitudinalAxis).normalize();
-  if (acrossAxis.lengthSq() > 0.5 && longitudinalAxis.lengthSq() > 0.5 && normalAxis.lengthSq() > 0.5) {
-    const handFrame = new THREE.Matrix4().makeBasis(acrossAxis, longitudinalAxis, normalAxis);
-    orientationGroup.quaternion.setFromRotationMatrix(handFrame);
+  if (rightHand) {
+    const toFramePoint = (landmark) => new THREE.Vector3(
+      landmark.x * width,
+      landmark.y * height,
+      landmark.z * width,
+    );
+    const wrist = toFramePoint(rightHand[0]);
+    const indexMcp = toFramePoint(rightHand[5]);
+    const middleMcp = toFramePoint(rightHand[9]);
+    const pinkyMcp = toFramePoint(rightHand[17]);
+    const acrossAxis = pinkyMcp.sub(indexMcp);
+    const longitudinalAxis = middleMcp.sub(wrist);
+    if (acrossAxis.lengthSq() > 1e-6) {
+      acrossAxis.normalize();
+      longitudinalAxis.addScaledVector(acrossAxis, -longitudinalAxis.dot(acrossAxis));
+      if (longitudinalAxis.lengthSq() > 1e-6) {
+        longitudinalAxis.normalize();
+        const normalAxis = acrossAxis.clone().cross(longitudinalAxis).normalize();
+        const handFrame = new THREE.Matrix4().makeBasis(acrossAxis, longitudinalAxis, normalAxis);
+        targetOrientation.setFromRotationMatrix(handFrame);
+      }
+    }
+
+    const minY = Math.min(...rightHand.map((landmark) => landmark.y * height));
+    targetHandAnchor.set(
+      rightHand.reduce((sum, landmark) => sum + landmark.x, 0) / rightHand.length * width,
+      minY,
+    );
+    hasRightHandPose = true;
   }
 
-  const minY = Math.min(...rightHand.map((landmark) => landmark.y * height));
-  const centerX = rightHand.reduce((sum, landmark) => sum + landmark.x, 0) / rightHand.length * width;
-  const objectHeight = 150 * scale;
-  modelGroup.position.set(centerX, minY - 18 - objectHeight / 2, 0);
-  modelGroup.scale.setScalar(scale);
+  if (!hasRightHandPose) {
+    modelGroup.visible = false;
+    return;
+  }
+
+  const objectHeight = 150 * targetScale;
+  targetPosition.set(targetHandAnchor.x, targetHandAnchor.y - 18 - objectHeight / 2, 0);
+  if (!poseInitialized) {
+    modelGroup.position.copy(targetPosition);
+    modelGroup.scale.setScalar(targetScale);
+    orientationGroup.quaternion.copy(targetOrientation);
+    poseInitialized = true;
+  } else {
+    const delta = lastPoseUpdateTime === undefined ? 0 : (timestamp - lastPoseUpdateTime) / 1000;
+    const smoothing = 1 - Math.exp(-12 * Math.min(delta, 0.1));
+    modelGroup.position.lerp(targetPosition, smoothing);
+    modelGroup.scale.setScalar(THREE.MathUtils.lerp(modelGroup.scale.x, targetScale, smoothing));
+    orientationGroup.quaternion.slerp(targetOrientation, smoothing);
+  }
+  lastPoseUpdateTime = timestamp;
   modelGroup.visible = true;
 }
 
@@ -223,7 +255,7 @@ function detectFrame() {
     resizeOverlay(video.videoWidth, video.videoHeight);
     const result = handLandmarker.detectForVideo(video, performance.now());
     drawLandmarks(result.landmarks);
-    updateObject(result.landmarks, result.handedness);
+    updateObject(result.landmarks, result.handedness, performance.now());
     renderer.render(scene, camera);
     status.textContent = `${result.landmarks.length} hand${result.landmarks.length === 1 ? "" : "s"} detected`;
   }
