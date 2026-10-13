@@ -32,6 +32,7 @@ scene.add(modelGroup);
 
 let handLandmarker;
 let handModel;
+let modelLoadRequest = 0;
 let cameraStream;
 let animationFrame;
 let lastVideoTime = -1;
@@ -52,6 +53,9 @@ const HAND_CONNECTIONS = [
 ];
 
 async function initializeTracker() {
+  const defaultModelPromise = loadDefaultModel().catch((error) => {
+    console.error(error);
+  });
   const vision = await FilesetResolver.forVisionTasks(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
   );
@@ -61,7 +65,8 @@ async function initializeTracker() {
     numHands: 2,
   });
 
-  status.textContent = "Choose an OBJ or DAE model";
+  await defaultModelPromise;
+  if (!handModel) status.textContent = "Default toaster unavailable; choose an OBJ or DAE model";
   toggleButton.disabled = false;
 }
 
@@ -114,6 +119,7 @@ function installModel(loadedHandModel) {
 }
 
 async function loadSelectedModel(file) {
+  const request = ++modelLoadRequest;
   const extension = file.name.split(".").pop()?.toLowerCase();
   const contents = await file.text();
   let loadedHandModel;
@@ -126,8 +132,20 @@ async function loadSelectedModel(file) {
     throw new Error("Choose an OBJ or DAE file");
   }
 
+  if (request !== modelLoadRequest) return;
   installModel(loadedHandModel);
   status.textContent = `Loaded ${file.name}`;
+}
+
+async function loadDefaultModel() {
+  const request = ++modelLoadRequest;
+  const response = await fetch("./copyrightFreeToaster.obj");
+  if (!response.ok) throw new Error("Could not load the default toaster model");
+
+  const loadedHandModel = new OBJLoader().parse(await response.text());
+  if (request !== modelLoadRequest) return;
+  installModel(loadedHandModel);
+  status.textContent = "Toaster ready; choose another model to replace it";
 }
 
 function resizeOverlay(width, height) {
